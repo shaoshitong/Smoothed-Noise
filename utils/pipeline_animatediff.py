@@ -39,9 +39,11 @@ class AnimateDiffPipeline_GN(AnimateDiffPipeline):
         self.ensemble = 1
         self.ensemble_rate = 0.1
         self.pre_num_inference_steps = 50
-        self.fast_ensemble = True
+        self.fast_ensemble = False
         self.momentum = 0.
-        self.ensemble_guidance_scale = True
+        self.traj_momentum = 0.05
+        self.ensemble_guidance_scale = False
+        self.noise_type = "uniform"
         
     @torch.no_grad()
     def __call__(self,
@@ -109,13 +111,14 @@ class AnimateDiffPipeline_GN(AnimateDiffPipeline):
         _prev_lasting_t = _timesteps[0] -_emergency_scheduler.config.num_train_timesteps // _emergency_scheduler.num_inference_steps
         _optim_steps = self.recall_timesteps
         
-        if self.ensemble_guidance_scale:
-            guidance_scale = guidance_scale / 2
-        positive_guidance_scale = guidance_scale if self.ensemble_guidance_scale else guidance_scale + torch.randn(1).item()
-        negative_guidance_scale = -guidance_scale  if not self.ensemble_guidance_scale else -guidance_scale + torch.randn(1).item()
-        
         for i in range(_optim_steps):
             if self.ensemble == 1:
+                if self.ensemble_guidance_scale:
+                    guidance_scale = guidance_scale
+                    rand = torch.randn(1).item()
+                positive_guidance_scale = guidance_scale if not self.ensemble_guidance_scale else guidance_scale + rand
+                negative_guidance_scale = 1.0 if not self.ensemble_guidance_scale else guidance_scale + rand
+            
                 _latent_model_input = torch.cat([_latents] * 2) if _do_classifier_free_guidance else _latents # Forward DDIM
                 _latent_model_input = _emergency_scheduler.scale_model_input(_latent_model_input, _lasting_t)
                 _noise_pred = self.unet(
@@ -147,12 +150,30 @@ class AnimateDiffPipeline_GN(AnimateDiffPipeline):
                 _latents = _inverse_scheduler.step(_noise_pred, _lasting_t, _latents, return_dict=False)[0]
             else:
                 results = []
+                _prev_latents = _latents.clone()
+                _prev_prev_latents = _latents.clone()
+                
                 for j in range(self.ensemble):
-                    if self.fast_ensemble:  
-                        _latents = self.momentum * results[-1] + (1 - self.momentum) * _latents if len(results)>0 else _latents
-                        _latents_n = torch.randn_like(_latents) * self.ensemble_rate * (1 - self.momentum) ** (j+1) + _latents
+                    if self.noise_type == "uniform":
+                        additional_noise = (torch.rand_like(_latents) - 0.5) * 2 * (3 ** (1/2))
+                    elif self.noise_type == "truncated_gaussian":
+                        additional_noise = torch.randn_like(_latents).clip_(-1, 1)
                     else:
-                        _latents_n = torch.randn_like(_latents) * self.ensemble_rate + _latents
+                        additional_noise = torch.randn_like(_latents)
+                    if self.fast_ensemble:
+                        _prev_prev_latents = _prev_latents
+                        _prev_latents = _latents
+                        _latents = results[-1] * (1-self.traj_momentum) + self.traj_momentum * (1-self.traj_momentum) * _prev_latents + self.traj_momentum * self.traj_momentum * _prev_prev_latents if len(results)>0 else _latents
+                        _latents_n = additional_noise * self.ensemble_rate * (1 - self.momentum) ** (j+1) + _latents
+                    else:
+                        _latents_n = additional_noise * self.ensemble_rate + _latents
+                    if self.ensemble_guidance_scale:
+                        guidance_scale = guidance_scale
+                        rand = torch.randn(1).item()
+                    positive_guidance_scale = guidance_scale if not self.ensemble_guidance_scale else guidance_scale + rand
+                    negative_guidance_scale = 1.0 if not self.ensemble_guidance_scale else 1.0 + rand
+                
+                    
                     _latent_model_input = torch.cat([_latents_n] * 2) if _do_classifier_free_guidance else _latents_n # Forward DDIM
                     _latent_model_input = _emergency_scheduler.scale_model_input(_latent_model_input, _lasting_t)
                     _noise_pred = self.unet(
@@ -170,7 +191,7 @@ class AnimateDiffPipeline_GN(AnimateDiffPipeline):
                     _latent_model_input = _emergency_scheduler.scale_model_input(_latent_model_input, _prev_lasting_t)
                     _noise_pred = self.unet(
                         _latent_model_input,
-                        _lasting_t,
+                        _prev_lasting_t,
                         encoder_hidden_states=_prompt_embeds,
                         cross_attention_kwargs=kwargs.get("cross_attention_kwargs", None),
                         added_cond_kwargs=added_cond_kwargs,

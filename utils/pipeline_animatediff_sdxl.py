@@ -42,14 +42,17 @@ class AnimateDiffSDXLPipeline_GN(AnimateDiffSDXLPipeline):
                 feature_extractor = feature_extractor,
                 force_zeros_for_empty_prompt = force_zeros_for_empty_prompt,
         )
+
         self.recall_timesteps = 1
         self.ensemble = 1
         self.ensemble_rate = 0.1
         self.pre_num_inference_steps = 50
-        self.pre_free_init_enabled = False
-        self.fast_ensemble = True
-        self.momentum = 0.01
-    
+        self.fast_ensemble = False
+        self.momentum = 0.
+        self.traj_momentum = 0.05
+        self.ensemble_guidance_scale = False
+        self.noise_type = "uniform"
+        
     @torch.no_grad()
     def __call__(self,
         prompt: Union[str, List[str]] = None,
@@ -183,17 +186,23 @@ class AnimateDiffSDXLPipeline_GN(AnimateDiffSDXLPipeline):
             _timestep_cond = self.get_guidance_scale_embedding(
                 _guidance_scale_tensor, embedding_dim=self.unet.config.time_cond_proj_dim
             ).to(device=_device, dtype=_latents.dtype)
-
-        _inverse_scheduler = DDIMInverseScheduler.from_pretrained('stabilityai/stable-diffusion-xl-base-1.0',
-                                                                    subfolder='scheduler')
+        
+        _inverse_scheduler = DDIMInverseScheduler.from_pretrained("/home/shaoshitong/.cache/huggingface/hub/.locks/models--stabilityai--stable-diffusion-xl-base-1.0",
+                                                                  subfolder='scheduler')
         _inverse_scheduler.set_timesteps(pre_num_inference_steps, device=_device)
         _lasting_t = _timesteps[0]
         _prev_lasting_t = _timesteps[0] -_emergency_scheduler.config.num_train_timesteps // _emergency_scheduler.num_inference_steps
-        print(_lasting_t, _prev_lasting_t)
         _optim_steps = self.recall_timesteps
         _added_cond_kwargs = {"text_embeds": _add_text_embeds, "time_ids": _add_time_ids}
+        
         for i in range(_optim_steps):
             if self.ensemble == 1:
+                if self.ensemble_guidance_scale:
+                    guidance_scale = guidance_scale
+                    rand = torch.randn(1).item()
+                positive_guidance_scale = guidance_scale if not self.ensemble_guidance_scale else guidance_scale + rand
+                negative_guidance_scale = 1.0  if not self.ensemble_guidance_scale else 1.0 + rand
+            
                 _latent_model_input = torch.cat([_latents] * 2) if _do_classifier_free_guidance else _latents # Forward DDIM
                 _latent_model_input = _emergency_scheduler.scale_model_input(_latent_model_input, _lasting_t)
                 _noise_pred = self.unet(
@@ -207,7 +216,7 @@ class AnimateDiffSDXLPipeline_GN(AnimateDiffSDXLPipeline):
                 )[0]
                 if _do_classifier_free_guidance:
                     _noise_pred_uncond, _noise_pred_text = _noise_pred.chunk(2)
-                    _noise_pred = _noise_pred_uncond + guidance_scale * (_noise_pred_text - _noise_pred_uncond)
+                    _noise_pred = _noise_pred_uncond + positive_guidance_scale * (_noise_pred_text - _noise_pred_uncond)
                 _latents = _emergency_scheduler.step(_noise_pred, _lasting_t, _latents, **extra_step_kwargs, return_dict=False)[0]
 
                 _latent_model_input = torch.cat([_latents] * 2) if _do_classifier_free_guidance else _latents  # Inverse DDIM
@@ -223,18 +232,37 @@ class AnimateDiffSDXLPipeline_GN(AnimateDiffSDXLPipeline):
                 )[0]
                 if _do_classifier_free_guidance:
                     _noise_pred_uncond, _noise_pred_text = _noise_pred.chunk(2)
-                    _noise_pred = _noise_pred_uncond - 1. * (_noise_pred_text - _noise_pred_uncond)
+                    _noise_pred = _noise_pred_uncond + negative_guidance_scale * (_noise_pred_text - _noise_pred_uncond)
                 _inv_extra_step_kwargs = copy.deepcopy(extra_step_kwargs)
                 _inv_extra_step_kwargs.pop("eta")
                 _latents = _inverse_scheduler.step(_noise_pred, _lasting_t, _latents, return_dict=False)[0]
             else:
                 results = []
+                _prev_latents = _latents.clone()
+                _prev_prev_latents = _latents.clone()
+                
                 for j in tqdm(range(self.ensemble)):
-                    if self.fast_ensemble:  
-                        _latents = self.momentum * results[-1] + (1 - self.momentum) * _latents if len(results)>0 else _latents
-                        _latents_n = torch.randn_like(_latents) * self.ensemble_rate * (1 - self.momentum) ** (j+1) + _latents
+                    if self.noise_type == "uniform":
+                        additional_noise = (torch.rand_like(_latents) - 0.5) * 2 * (3 ** (1/2))
+                    elif self.noise_type == "truncated_gaussian":
+                        additional_noise = torch.randn_like(_latents).clip_(-1, 1)
                     else:
-                        _latents_n = torch.randn_like(_latents) * self.ensemble_rate + _latents
+                        additional_noise = torch.randn_like(_latents)
+                    
+                    if self.fast_ensemble:
+                        _prev_prev_latents = _prev_latents
+                        _prev_latents = _latents
+                        _latents = results[-1] * (1-self.traj_momentum) + self.traj_momentum * (1-self.traj_momentum) * _prev_latents + self.traj_momentum * self.traj_momentum * _prev_prev_latents if len(results)>0 else _latents
+                        _latents_n = additional_noise * self.ensemble_rate * (1 - self.momentum) ** (j+1) + _latents
+                    else:
+                        _latents_n = additional_noise * self.ensemble_rate + _latents
+                    
+                    if self.ensemble_guidance_scale:
+                        guidance_scale = guidance_scale
+                        rand = torch.randn(1).item()
+                    positive_guidance_scale = guidance_scale if not self.ensemble_guidance_scale else guidance_scale + rand
+                    negative_guidance_scale = 1.0 if not self.ensemble_guidance_scale else 1.0 + rand
+                
                     _latent_model_input = torch.cat([_latents_n] * 2) if _do_classifier_free_guidance else _latents_n # Forward DDIM
                     _latent_model_input = _emergency_scheduler.scale_model_input(_latent_model_input, _lasting_t)
                     _noise_pred = self.unet(
@@ -248,7 +276,7 @@ class AnimateDiffSDXLPipeline_GN(AnimateDiffSDXLPipeline):
                     )[0]
                     if _do_classifier_free_guidance:
                         _noise_pred_uncond, _noise_pred_text = _noise_pred.chunk(2)
-                        _noise_pred = _noise_pred_uncond - 1. * (_noise_pred_text - _noise_pred_uncond)
+                        _noise_pred = _noise_pred_uncond + positive_guidance_scale * (_noise_pred_text - _noise_pred_uncond)
                     _latents_n = _emergency_scheduler.step(_noise_pred, _lasting_t, _latents_n, **extra_step_kwargs, return_dict=False)[0]
                     _latent_model_input = torch.cat([_latents_n] * 2) if _do_classifier_free_guidance else _latents_n  # Inverse DDIM
                     _latent_model_input = _emergency_scheduler.scale_model_input(_latent_model_input, _lasting_t)
@@ -263,7 +291,7 @@ class AnimateDiffSDXLPipeline_GN(AnimateDiffSDXLPipeline):
                     )[0]
                     if _do_classifier_free_guidance:
                         _noise_pred_uncond, _noise_pred_text = _noise_pred.chunk(2)
-                        _noise_pred = _noise_pred_uncond + guidance_scale * (_noise_pred_text - _noise_pred_uncond)
+                        _noise_pred = _noise_pred_uncond + negative_guidance_scale * (_noise_pred_text - _noise_pred_uncond)
                     _inv_extra_step_kwargs = copy.deepcopy(extra_step_kwargs)
                     _inv_extra_step_kwargs.pop("eta")
                     _latents_n = _inverse_scheduler.step(_noise_pred, _lasting_t, _latents_n, return_dict=False)[0]

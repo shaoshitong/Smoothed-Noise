@@ -25,6 +25,11 @@ def parse_args():
         default=1,
     )
     parser.add_argument(
+        "--noise_type",
+        type=str,
+        default="gaussian",
+    )
+    parser.add_argument(
         "--ensemble",
         type=int,
         default=50,
@@ -33,6 +38,11 @@ def parse_args():
         "--momentum",
         type=float,
         default=0.15,
+    )
+    parser.add_argument(
+        "--traj_momentum",
+        type=float,
+        default=0.05,
     )
     parser.add_argument(
         "--ensemble_rate",
@@ -82,8 +92,17 @@ if __name__ == "__main__":
         pipe.recall_timesteps = args.recall_timesteps
         pipe.ensemble = args.ensemble
         pipe.momentum = args.momentum
+        pipe.traj_momentum = args.traj_momentum
         pipe.ensemble_rate = args.ensemble_rate
         pipe.fast_ensemble = args.fast_ensemble
+        pipe.noise_type = args.noise_type
+        print("recall_timesteps", pipe.recall_timesteps, 
+          "ensemble", pipe.ensemble, 
+          "momentum", pipe.momentum, 
+          "traj_momentum",pipe.traj_momentum,
+          "ensemble_rate", pipe.ensemble_rate, 
+          "fast_ensemble", pipe.fast_ensemble,
+          "noise_type",pipe.noise_type)
     else:
         # Load the motion adapter
         adapter = MotionAdapter.from_pretrained("guoyww/animatediff-motion-adapter-v1-5-3", torch_dtype=torch.float16)
@@ -98,18 +117,22 @@ if __name__ == "__main__":
         pipe.recall_timesteps = args.recall_timesteps
         pipe.ensemble = args.ensemble
         pipe.momentum = args.momentum
+        pipe.traj_momentum = args.traj_momentum
         pipe.ensemble_rate = args.ensemble_rate
         pipe.fast_ensemble = args.fast_ensemble
+        pipe.noise_type = args.noise_type
     print("recall_timesteps", pipe.recall_timesteps, 
           "ensemble", pipe.ensemble, 
           "momentum", pipe.momentum, 
+          "traj_momentum",pipe.traj_momentum,
           "ensemble_rate", pipe.ensemble_rate, 
-          "fast_ensemble", pipe.fast_ensemble)
+          "fast_ensemble", pipe.fast_ensemble,
+          "noise_type",pipe.noise_type)
     # enable memory savings
     pipe.enable_vae_slicing()
     pipe.enable_vae_tiling()
     # pipe.enable_xformers_memory_efficient_attention()
-    root_path = os.path.join("/data/shaoshitong/Chronomagic/", f"{args.method}", "total_150", args.tag + f"_en_{args.ensemble}_fast_{args.fast_ensemble}_mom_{args.momentum}_enr_{args.ensemble_rate}_recall_{args.recall_timesteps}")
+    root_path = os.path.join("/data/shaoshitong/Chronomagic/", f"{args.method}", "total_150", args.tag + f"_en_{args.ensemble}_fast_{args.fast_ensemble}_mom_{args.momentum}_trajmom{args.traj_momentum}_enr_{args.ensemble_rate}_recall_{args.recall_timesteps}")
 
     if not os.path.exists(root_path):
         os.makedirs(root_path)

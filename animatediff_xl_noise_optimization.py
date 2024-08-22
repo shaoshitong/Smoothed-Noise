@@ -9,6 +9,7 @@ import argparse
 import pandas as pd
 
 
+
 def parse_args():
     parser = argparse.ArgumentParser(description="Smoothed Path Optimization")
     # ----------Model Checkpoint Loading Arguments----------
@@ -25,9 +26,24 @@ def parse_args():
         default=1,
     )
     parser.add_argument(
+        "--noise_type",
+        type=str,
+        default="gaussian",
+    )
+    parser.add_argument(
         "--ensemble",
         type=int,
         default=50,
+    )
+    parser.add_argument(
+        "--momentum",
+        type=float,
+        default=0.15,
+    )
+    parser.add_argument(
+        "--traj_momentum",
+        type=float,
+        default=0.05,
     )
     parser.add_argument(
         "--begin",
@@ -38,11 +54,6 @@ def parse_args():
         "--end",
         type=int,
         default=-1,
-    )
-    parser.add_argument(
-        "--momentum",
-        type=float,
-        default=0.15,
     )
     parser.add_argument(
         "--ensemble_rate",
@@ -68,10 +79,10 @@ if __name__ == "__main__":
     
     prompt_file = pd.read_csv("/home/shaoshitong/project/NoiseModel/VideoGoldenNoise/Captions_ChronoMagic-Bench.csv",
                             usecols=[0,1])
-    if args.end > len(list(prompt_file["name"])):
-        args.end = -1
-    prompts = list(prompt_file["name"])[args.begin:args.end]
-    filenames = list(prompt_file["videoid"])[args.begin:args.end]
+    if args.end > len(list(prompt_file["name"])) or args.end == -1:
+        args.end = len(list(prompt_file["name"]))
+    prompts = list(prompt_file["name"])[args.begin:args.end+1]
+    filenames = list(prompt_file["videoid"])[args.begin:args.end+1]
     method = args.method
     if method == "sdxl":
         adapter = MotionAdapter.from_pretrained("guoyww/animatediff-motion-adapter-sdxl-beta", torch_dtype=torch.float16)
@@ -94,8 +105,18 @@ if __name__ == "__main__":
         pipe.recall_timesteps = args.recall_timesteps
         pipe.ensemble = args.ensemble
         pipe.momentum = args.momentum
+        pipe.traj_momentum = args.traj_momentum
         pipe.ensemble_rate = args.ensemble_rate
         pipe.fast_ensemble = args.fast_ensemble
+        pipe.noise_type = args.noise_type
+        print("recall_timesteps", pipe.recall_timesteps, 
+          "ensemble", pipe.ensemble, 
+          "momentum", pipe.momentum, 
+          "traj_momentum",pipe.traj_momentum,
+          "ensemble_rate", pipe.ensemble_rate, 
+          "fast_ensemble", pipe.fast_ensemble,
+          "noise_type",pipe.noise_type)
+
     else:
         # Load the motion adapter
         adapter = MotionAdapter.from_pretrained("guoyww/animatediff-motion-adapter-v1-5-3", torch_dtype=torch.float16)
@@ -110,13 +131,17 @@ if __name__ == "__main__":
         pipe.recall_timesteps = args.recall_timesteps
         pipe.ensemble = args.ensemble
         pipe.momentum = args.momentum
+        pipe.traj_momentum = args.traj_momentum
         pipe.ensemble_rate = args.ensemble_rate
         pipe.fast_ensemble = args.fast_ensemble
-    print("recall_timesteps", pipe.recall_timesteps, 
+        pipe.noise_type = args.noise_type
+        print("recall_timesteps", pipe.recall_timesteps, 
           "ensemble", pipe.ensemble, 
           "momentum", pipe.momentum, 
+          "traj_momentum",pipe.traj_momentum,
           "ensemble_rate", pipe.ensemble_rate, 
-          "fast_ensemble", pipe.fast_ensemble)
+          "fast_ensemble", pipe.fast_ensemble,
+          "noise_type",pipe.noise_type)
     # enable memory savings
     pipe.enable_vae_slicing()
     pipe.enable_vae_tiling()
